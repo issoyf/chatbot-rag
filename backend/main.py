@@ -1,7 +1,7 @@
 import uuid
 import ollama
 import chromadb
-from fastapi import FastAPI, UploadFile, File
+from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from pypdf import PdfReader
@@ -11,7 +11,7 @@ MODEL = "llama3.2:3b"
 app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:4200"],
+    allow_origins=["http://localhost:4200", "http://127.0.0.1:4200"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -30,6 +30,11 @@ def chunk_text(text, size=800, overlap=100):
 
 @app.post("/documents")
 async def upload_document(file: UploadFile = File(...)):
+    # Protection contre les doublons
+    existing = collection.get(where={"source": file.filename})
+    if existing["ids"]:
+        raise HTTPException(status_code=409, detail="Ce document est déjà importé.")
+
     reader = PdfReader(file.file)
     ids, docs, metas = [], [], []
     for page_num, page in enumerate(reader.pages, start=1):
@@ -37,9 +42,25 @@ async def upload_document(file: UploadFile = File(...)):
             ids.append(str(uuid.uuid4()))
             docs.append(chunk)
             metas.append({"source": file.filename, "page": page_num})
-    if docs:
-        collection.add(ids=ids, documents=docs, metadatas=metas)
+    if not docs:
+        raise HTTPException(status_code=422, detail="Aucun texte trouvé dans ce PDF.")
+    collection.add(ids=ids, documents=docs, metadatas=metas)
     return {"filename": file.filename, "chunks": len(docs)}
+
+
+@app.get("/documents")
+def list_documents():
+    data = collection.get(include=["metadatas"])
+    counts = {}
+    for m in data["metadatas"]:
+        counts[m["source"]] = counts.get(m["source"], 0) + 1
+    return [{"filename": name, "chunks": n} for name, n in counts.items()]
+
+
+@app.delete("/documents/{filename}")
+def delete_document(filename: str):
+    collection.delete(where={"source": filename})
+    return {"deleted": filename}
 
 
 class ChatRequest(BaseModel):

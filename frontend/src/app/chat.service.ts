@@ -11,6 +11,11 @@ export interface ChatResponse {
   sources: Source[];
 }
 
+export interface DocInfo {
+  filename: string;
+  chunks: number;
+}
+
 @Injectable({ providedIn: 'root' })
 export class ChatService {
   private http = inject(HttpClient);
@@ -24,5 +29,13 @@ export class ChatService {
     const form = new FormData();
     form.append('file', file);
     return this.http.post(`${this.api}/documents`, form);
+  }
+
+  listDocuments() {
+    return this.http.get<DocInfo[]>(`${this.api}/documents`);
+  }
+
+  deleteDocument(filename: string) {
+    return this.http.delete(`${this.api}/documents/${encodeURIComponent(filename)}`);
   }
 }
