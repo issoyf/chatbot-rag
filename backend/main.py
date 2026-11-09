@@ -1,3 +1,4 @@
+import json
 import uuid
 import ollama
 import chromadb
@@ -5,6 +6,7 @@ from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from pypdf import PdfReader
+from database import SessionLocal, Conversation, Message
 
 MODEL = "llama3.2:3b"
 
@@ -28,9 +30,10 @@ def chunk_text(text, size=800, overlap=100):
     return chunks
 
 
+# ---------- Documents ----------
+
 @app.post("/documents")
 async def upload_document(file: UploadFile = File(...)):
-    # Protection contre les doublons
     existing = collection.get(where={"source": file.filename})
     if existing["ids"]:
         raise HTTPException(status_code=409, detail="Ce document est déjà importé.")
@@ -63,37 +66,108 @@ def delete_document(filename: str):
     return {"deleted": filename}
 
 
+# ---------- Conversations ----------
+
+@app.get("/conversations")
+def list_conversations():
+    db = SessionLocal()
+    try:
+        convs = db.query(Conversation).order_by(Conversation.id.desc()).all()
+        return [{"id": c.id, "title": c.title} for c in convs]
+    finally:
+        db.close()
+
+
+@app.get("/conversations/{conv_id}")
+def get_conversation(conv_id: int):
+    db = SessionLocal()
+    try:
+        c = db.get(Conversation, conv_id)
+        if not c:
+            raise HTTPException(status_code=404, detail="Conversation introuvable.")
+        return {
+            "id": c.id,
+            "title": c.title,
+            "messages": [
+                {"role": m.role, "text": m.text, "sources": json.loads(m.sources)}
+                for m in c.messages
+            ],
+        }
+    finally:
+        db.close()
+
+
+@app.delete("/conversations/{conv_id}")
+def delete_conversation(conv_id: int):
+    db = SessionLocal()
+    try:
+        c = db.get(Conversation, conv_id)
+        if c:
+            db.delete(c)
+            db.commit()
+        return {"deleted": conv_id}
+    finally:
+        db.close()
+
+
+# ---------- Chat ----------
+
 class ChatRequest(BaseModel):
     question: str
+    conversation_id: int | None = None
 
 
 @app.post("/chat")
 def chat(req: ChatRequest):
-    if collection.count() == 0:
-        return {"answer": "Aucun document importé pour le moment.", "sources": []}
+    db = SessionLocal()
+    try:
+        # Créer ou retrouver la conversation
+        if req.conversation_id:
+            conv = db.get(Conversation, req.conversation_id)
+            if not conv:
+                raise HTTPException(status_code=404, detail="Conversation introuvable.")
+        else:
+            conv = Conversation(title=req.question[:50])
+            db.add(conv)
+            db.commit()
+            db.refresh(conv)
 
-    results = collection.query(query_texts=[req.question], n_results=4)
-    docs = results["documents"][0]
-    metas = results["metadatas"][0]
+        db.add(Message(conversation_id=conv.id, role="user", text=req.question))
+        db.commit()
 
-    context = "\n\n".join(
-        f"[{m['source']}, page {m['page']}]\n{d}" for d, m in zip(docs, metas)
-    )
-    response = ollama.chat(
-        model=MODEL,
-        messages=[
-            {
-                "role": "system",
-                "content": (
-                    "Tu réponds en français, uniquement à partir du contexte fourni. "
-                    "Si la réponse n'y est pas, dis-le clairement."
-                ),
-            },
-            {
-                "role": "user",
-                "content": f"Contexte :\n{context}\n\nQuestion : {req.question}",
-            },
-        ],
-    )
-    sources = [{"source": m["source"], "page": m["page"]} for m in metas]
-    return {"answer": response["message"]["content"], "sources": sources}
+        if collection.count() == 0:
+            answer, sources = "Aucun document importé pour le moment.", []
+        else:
+            results = collection.query(query_texts=[req.question], n_results=4)
+            docs = results["documents"][0]
+            metas = results["metadatas"][0]
+            context = "\n\n".join(
+                f"[{m['source']}, page {m['page']}]\n{d}" for d, m in zip(docs, metas)
+            )
+            response = ollama.chat(
+                model=MODEL,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "Tu réponds en français, uniquement à partir du contexte fourni. "
+                            "Si la réponse n'y est pas, dis-le clairement."
+                        ),
+                    },
+                    {
+                        "role": "user",
+                        "content": f"Contexte :\n{context}\n\nQuestion : {req.question}",
+                    },
+                ],
+            )
+            answer = response["message"]["content"]
+            sources = [{"source": m["source"], "page": m["page"]} for m in metas]
+
+        db.add(Message(
+            conversation_id=conv.id, role="bot", text=answer,
+            sources=json.dumps(sources),
+        ))
+        db.commit()
+        return {"answer": answer, "sources": sources, "conversation_id": conv.id}
+    finally:
+        db.close()
