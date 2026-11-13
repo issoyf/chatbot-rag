@@ -7,9 +7,18 @@ SessionLocal = sessionmaker(bind=engine, autoflush=False)
 Base = declarative_base()
 
 
+class User(Base):
+    __tablename__ = "users"
+    id = Column(Integer, primary_key=True)
+    username = Column(String(50), unique=True, nullable=False)
+    password_hash = Column(String(100), nullable=False)
+    role = Column(String(10), default="student")  # "student" ou "admin"
+
+
 class Conversation(Base):
     __tablename__ = "conversations"
     id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     title = Column(String(100), default="Nouvelle conversation")
     created_at = Column(DateTime, default=datetime.utcnow)
     messages = relationship(
@@ -24,7 +33,7 @@ class Message(Base):
     conversation_id = Column(Integer, ForeignKey("conversations.id"))
     role = Column(String(10))
     text = Column(Text)
-    sources = Column(Text, default="[]")  # JSON sous forme de texte
+    sources = Column(Text, default="[]")
     conversation = relationship("Conversation", back_populates="messages")
 
 

@@ -2,11 +2,17 @@ import json
 import uuid
 import ollama
 import chromadb
-from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi import FastAPI, UploadFile, File, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import OAuth2PasswordRequestForm
 from pydantic import BaseModel
 from pypdf import PdfReader
-from database import SessionLocal, Conversation, Message
+
+from database import SessionLocal, User, Conversation, Message
+from auth import (
+    hash_password, verify_password, create_token,
+    get_current_user, require_admin,
+)
 
 MODEL = "llama3.2:3b"
 
@@ -30,10 +36,83 @@ def chunk_text(text, size=800, overlap=100):
     return chunks
 
 
+# ---------- Création du compte admin au démarrage ----------
+
+def create_default_admin():
+    db = SessionLocal()
+    try:
+        if not db.query(User).filter(User.username == "admin").first():
+            db.add(User(
+                username="admin",
+                password_hash=hash_password("admin123"),
+                role="admin",
+            ))
+            db.commit()
+    finally:
+        db.close()
+
+
+create_default_admin()
+
+
+# ---------- Authentification ----------
+
+class RegisterRequest(BaseModel):
+    username: str
+    password: str
+
+
+def auth_response(user: User):
+    return {
+        "access_token": create_token(user),
+        "token_type": "bearer",
+        "username": user.username,
+        "role": user.role,
+    }
+
+
+@app.post("/register")
+def register(req: RegisterRequest):
+    username = req.username.strip()
+    if len(username) < 3:
+        raise HTTPException(status_code=422, detail="Nom d'utilisateur trop court (3 minimum).")
+    if len(req.password) < 6:
+        raise HTTPException(status_code=422, detail="Mot de passe trop court (6 minimum).")
+
+    db = SessionLocal()
+    try:
+        if db.query(User).filter(User.username == username).first():
+            raise HTTPException(status_code=409, detail="Ce nom d'utilisateur existe déjà.")
+        user = User(username=username, password_hash=hash_password(req.password), role="student")
+        db.add(user)
+        db.commit()
+        db.refresh(user)
+        return auth_response(user)
+    finally:
+        db.close()
+
+
+@app.post("/login")
+def login(form: OAuth2PasswordRequestForm = Depends()):
+    db = SessionLocal()
+    try:
+        user = db.query(User).filter(User.username == form.username).first()
+        if not user or not verify_password(form.password, user.password_hash):
+            raise HTTPException(status_code=401, detail="Identifiants incorrects.")
+        return auth_response(user)
+    finally:
+        db.close()
+
+
+@app.get("/me")
+def me(user: dict = Depends(get_current_user)):
+    return user
+
+
 # ---------- Documents ----------
 
 @app.post("/documents")
-async def upload_document(file: UploadFile = File(...)):
+async def upload_document(file: UploadFile = File(...), admin: dict = Depends(require_admin)):
     existing = collection.get(where={"source": file.filename})
     if existing["ids"]:
         raise HTTPException(status_code=409, detail="Ce document est déjà importé.")
@@ -52,7 +131,7 @@ async def upload_document(file: UploadFile = File(...)):
 
 
 @app.get("/documents")
-def list_documents():
+def list_documents(user: dict = Depends(get_current_user)):
     data = collection.get(include=["metadatas"])
     counts = {}
     for m in data["metadatas"]:
@@ -61,29 +140,34 @@ def list_documents():
 
 
 @app.delete("/documents/{filename}")
-def delete_document(filename: str):
+def delete_document(filename: str, admin: dict = Depends(require_admin)):
     collection.delete(where={"source": filename})
     return {"deleted": filename}
 
 
-# ---------- Conversations ----------
+# ---------- Conversations (propres à chaque utilisateur) ----------
 
 @app.get("/conversations")
-def list_conversations():
+def list_conversations(user: dict = Depends(get_current_user)):
     db = SessionLocal()
     try:
-        convs = db.query(Conversation).order_by(Conversation.id.desc()).all()
+        convs = (
+            db.query(Conversation)
+            .filter(Conversation.user_id == user["id"])
+            .order_by(Conversation.id.desc())
+            .all()
+        )
         return [{"id": c.id, "title": c.title} for c in convs]
     finally:
         db.close()
 
 
 @app.get("/conversations/{conv_id}")
-def get_conversation(conv_id: int):
+def get_conversation(conv_id: int, user: dict = Depends(get_current_user)):
     db = SessionLocal()
     try:
         c = db.get(Conversation, conv_id)
-        if not c:
+        if not c or c.user_id != user["id"]:
             raise HTTPException(status_code=404, detail="Conversation introuvable.")
         return {
             "id": c.id,
@@ -98,11 +182,11 @@ def get_conversation(conv_id: int):
 
 
 @app.delete("/conversations/{conv_id}")
-def delete_conversation(conv_id: int):
+def delete_conversation(conv_id: int, user: dict = Depends(get_current_user)):
     db = SessionLocal()
     try:
         c = db.get(Conversation, conv_id)
-        if c:
+        if c and c.user_id == user["id"]:
             db.delete(c)
             db.commit()
         return {"deleted": conv_id}
@@ -118,16 +202,15 @@ class ChatRequest(BaseModel):
 
 
 @app.post("/chat")
-def chat(req: ChatRequest):
+def chat(req: ChatRequest, user: dict = Depends(get_current_user)):
     db = SessionLocal()
     try:
-        # Créer ou retrouver la conversation
         if req.conversation_id:
             conv = db.get(Conversation, req.conversation_id)
-            if not conv:
+            if not conv or conv.user_id != user["id"]:
                 raise HTTPException(status_code=404, detail="Conversation introuvable.")
         else:
-            conv = Conversation(title=req.question[:50])
+            conv = Conversation(title=req.question[:50], user_id=user["id"])
             db.add(conv)
             db.commit()
             db.refresh(conv)
