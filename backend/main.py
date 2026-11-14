@@ -15,6 +15,7 @@ from auth import (
 )
 
 MODEL = "llama3.2:3b"
+HISTORY_SIZE = 6  # nombre de messages précédents donnés à l'IA
 
 app = FastAPI()
 app.add_middleware(
@@ -36,7 +37,7 @@ def chunk_text(text, size=800, overlap=100):
     return chunks
 
 
-# ---------- Création du compte admin au démarrage ----------
+# ---------- Compte admin par défaut ----------
 
 def create_default_admin():
     db = SessionLocal()
@@ -145,7 +146,7 @@ def delete_document(filename: str, admin: dict = Depends(require_admin)):
     return {"deleted": filename}
 
 
-# ---------- Conversations (propres à chaque utilisateur) ----------
+# ---------- Conversations ----------
 
 @app.get("/conversations")
 def list_conversations(user: dict = Depends(get_current_user)):
@@ -194,7 +195,7 @@ def delete_conversation(conv_id: int, user: dict = Depends(get_current_user)):
         db.close()
 
 
-# ---------- Chat ----------
+# ---------- Chat (avec mémoire) ----------
 
 class ChatRequest(BaseModel):
     question: str
@@ -215,33 +216,54 @@ def chat(req: ChatRequest, user: dict = Depends(get_current_user)):
             db.commit()
             db.refresh(conv)
 
+        # Historique récent (avant d'ajouter la nouvelle question)
+        previous = (
+            db.query(Message)
+            .filter(Message.conversation_id == conv.id)
+            .order_by(Message.id)
+            .all()
+        )[-HISTORY_SIZE:]
+        history = [
+            {"role": "assistant" if m.role == "bot" else "user", "content": m.text}
+            for m in previous
+        ]
+
         db.add(Message(conversation_id=conv.id, role="user", text=req.question))
         db.commit()
 
         if collection.count() == 0:
             answer, sources = "Aucun document importé pour le moment.", []
         else:
-            results = collection.query(query_texts=[req.question], n_results=4)
+            # Pour les questions de suivi, on ajoute la question précédente à la recherche
+            last_user = next((m.text for m in reversed(previous) if m.role == "user"), "")
+            search_query = f"{last_user} {req.question}".strip()
+
+            results = collection.query(query_texts=[search_query], n_results=4)
             docs = results["documents"][0]
             metas = results["metadatas"][0]
             context = "\n\n".join(
                 f"[{m['source']}, page {m['page']}]\n{d}" for d, m in zip(docs, metas)
             )
+
+            messages = [
+                {
+                    "role": "system",
+                    "content": (
+                        "Tu réponds en français, uniquement à partir du contexte fourni. "
+                        "Si la réponse n'y est pas, dis-le clairement. "
+                        "Tu peux utiliser le format Markdown (listes, gras) pour être lisible."
+                    ),
+                },
+                *history,
+                {
+                    "role": "user",
+                    "content": f"Contexte :\n{context}\n\nQuestion : {req.question}",
+                },
+            ]
             response = ollama.chat(
                 model=MODEL,
-                messages=[
-                    {
-                        "role": "system",
-                        "content": (
-                            "Tu réponds en français, uniquement à partir du contexte fourni. "
-                            "Si la réponse n'y est pas, dis-le clairement."
-                        ),
-                    },
-                    {
-                        "role": "user",
-                        "content": f"Contexte :\n{context}\n\nQuestion : {req.question}",
-                    },
-                ],
+                messages=messages,
+                options={"num_ctx": 4096},
             )
             answer = response["message"]["content"]
             sources = [{"source": m["source"], "page": m["page"]} for m in metas]

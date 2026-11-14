@@ -1,1 +1,49 @@
 /* You can add global styles to this file, and also import other style files */
+/* ===== Thème clair / sombre ===== */
+:root {
+  --bg: #f5f6f8;
+  --surface: #ffffff;
+  --text: #1f2328;
+  --muted: #6b7280;
+  --border: #dfe3e8;
+  --bubble: #eceff3;
+  --sidebar: #f0f2f5;
+  --hover: #e4e8ee;
+  --active: #d6e6f8;
+  --primary: #1976d2;
+  --danger: #c62828;
+}
+
+:root[data-theme='dark'] {
+  --bg: #14161a;
+  --surface: #1c1f26;
+  --text: #e6e8eb;
+  --muted: #9aa0a6;
+  --border: #323743;
+  --bubble: #2a2e38;
+  --sidebar: #181b21;
+  --hover: #262a33;
+  --active: #26364f;
+  --primary: #4c8dff;
+  --danger: #ef6b6b;
+}
+
+html, body { height: 100%; }
+body {
+  margin: 0;
+  font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+}
+
+/* ===== Rendu Markdown des réponses ===== */
+.md > :first-child { margin-top: 0; }
+.md > :last-child { margin-bottom: 0; }
+.md p { margin: .5rem 0; }
+.md ul, .md ol { margin: .5rem 0; padding-left: 1.4rem; }
+.md h1, .md h2, .md h3 { margin: .8rem 0 .4rem; font-size: 1.05rem; }
+.md code { background: rgba(127, 127, 127, .2); padding: .1rem .35rem; border-radius: 4px; font-size: .9em; }
+.md pre { background: rgba(127, 127, 127, .15); padding: .7rem; border-radius: 6px; overflow-x: auto; }
+.md pre code { background: none; padding: 0; }
+.md table { border-collapse: collapse; }
+.md th, .md td { border: 1px solid var(--border); padding: .3rem .6rem; }
